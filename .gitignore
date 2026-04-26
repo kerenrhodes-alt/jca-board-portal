@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Supabase CLI cache (auth tokens, etc.)
+supabase/.temp/
+
+# Stray empty files accidentally created at the project root
+/Caveats
+/Fetching
+/Pouring
+/Running
