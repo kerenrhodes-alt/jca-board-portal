@@ -1,4 +1,7 @@
 // Phase 5: list files in a Drive folder using the JCA service account.
+// Returns the meeting folder's top-level files plus a one-level-deep
+// listing of any subfolders. Does not recurse beyond one level —
+// nested folders inside a subfolder are silently dropped.
 //
 // Auth: two layers. (1) Supabase platform-level JWT verification rejects
 // unauthenticated requests before this code runs. (2) We additionally
@@ -12,7 +15,20 @@ interface ServiceAccountCreds {
   private_key: string;
 }
 
+interface DriveItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+  webViewLink: string;
+  iconLink?: string;
+  size?: string;
+}
+
 const SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const FILE_FIELDS =
+  'id, name, mimeType, modifiedTime, webViewLink, iconLink, size';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -90,6 +106,33 @@ async function getDriveAccessToken(creds: ServiceAccountCreds): Promise<string> 
   return data.access_token;
 }
 
+async function listFolder(
+  folderId: string,
+  accessToken: string,
+): Promise<DriveItem[]> {
+  const url = new URL('https://www.googleapis.com/drive/v3/files');
+  url.searchParams.set('q', `'${folderId}' in parents and trashed = false`);
+  url.searchParams.set('fields', `files(${FILE_FIELDS})`);
+  url.searchParams.set('orderBy', 'name');
+  // Without these flags, files inside a shared drive silently return
+  // as an empty list — Drive's most common foot-gun for service
+  // accounts.
+  url.searchParams.set('supportsAllDrives', 'true');
+  url.searchParams.set('includeItemsFromAllDrives', 'true');
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(
+      `Drive API error (${res.status}) for folder ${folderId}: ${detail}`,
+    );
+  }
+  const data = (await res.json()) as { files?: DriveItem[] };
+  return data.files ?? [];
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -137,7 +180,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'folderId is required' }, 400);
     }
 
-    // ---- Drive call
+    // ---- Drive calls (1 + N, in parallel)
     const credsRaw = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_JSON');
     if (!credsRaw) {
       return jsonResponse(
@@ -148,32 +191,29 @@ Deno.serve(async (req) => {
     const creds: ServiceAccountCreds = JSON.parse(credsRaw);
     const accessToken = await getDriveAccessToken(creds);
 
-    const url = new URL('https://www.googleapis.com/drive/v3/files');
-    url.searchParams.set('q', `'${folderId}' in parents and trashed = false`);
-    url.searchParams.set(
-      'fields',
-      'files(id, name, mimeType, modifiedTime, webViewLink, iconLink, size)',
+    const topItems = await listFolder(folderId, accessToken);
+
+    const topFiles = topItems.filter((i) => i.mimeType !== FOLDER_MIME);
+    const subfolderItems = topItems.filter((i) => i.mimeType === FOLDER_MIME);
+
+    // One Drive call per subfolder, in parallel. Promise.all means any
+    // single failure propagates to the top-level error path —
+    // predictable for v1; can soften to Promise.allSettled later if
+    // partial results become useful.
+    const subfolders = await Promise.all(
+      subfolderItems.map(async (sf) => {
+        const children = await listFolder(sf.id, accessToken);
+        return {
+          id: sf.id,
+          name: sf.name,
+          // Nested folders inside a subfolder are intentionally dropped
+          // — spec is one level deep only.
+          files: children.filter((i) => i.mimeType !== FOLDER_MIME),
+        };
+      }),
     );
-    url.searchParams.set('orderBy', 'name');
-    // Without these flags, files inside a shared drive silently return
-    // as an empty list — Drive's most common foot-gun for service
-    // accounts.
-    url.searchParams.set('supportsAllDrives', 'true');
-    url.searchParams.set('includeItemsFromAllDrives', 'true');
 
-    const driveRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!driveRes.ok) {
-      const detail = await driveRes.text();
-      return jsonResponse(
-        { error: 'Drive API error', status: driveRes.status, detail },
-        driveRes.status,
-      );
-    }
-
-    return jsonResponse(await driveRes.json());
+    return jsonResponse({ files: topFiles, subfolders });
   } catch (e) {
     console.error('drive-list-folder error:', e);
     return jsonResponse(

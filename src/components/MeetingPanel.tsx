@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthProvider';
-import { useDriveFolder } from '../hooks/useDriveFolder';
+import { useDriveFolder, type DriveSubfolder } from '../hooks/useDriveFolder';
 import { recordDocumentView } from '../lib/recordView';
 import { FileRow } from './FileRow';
 import type { BoardMeeting } from '../lib/db';
@@ -18,7 +18,7 @@ export function MeetingPanel({
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const { member } = useAuth();
-  const { files, loading, error, reload } = useDriveFolder(
+  const { files, subfolders, loading, error, reload } = useDriveFolder(
     meeting.drive_folder_id,
     expanded,
   );
@@ -30,6 +30,8 @@ export function MeetingPanel({
   const containerClass = isFeatured
     ? 'rounded-xl bg-white shadow-sm border border-[#1A5FA8]/30 ring-1 ring-[#1A5FA8]/10'
     : 'rounded-xl bg-white shadow-sm border border-gray-100';
+
+  const isEmpty = files.length === 0 && subfolders.length === 0;
 
   return (
     <div className={containerClass}>
@@ -81,20 +83,84 @@ export function MeetingPanel({
                 Retry
               </button>
             </div>
-          ) : files.length === 0 ? (
+          ) : isEmpty ? (
             <p className="px-3 py-3 text-sm text-gray-500">
               No files yet — files added in Drive will appear here automatically.
             </p>
           ) : (
-            <div className="space-y-0.5">
-              {files.map((f) => (
-                <FileRow
-                  key={f.id}
-                  file={f}
-                  onClick={() => onFileClick(f.id)}
+            <>
+              {files.length > 0 && (
+                <div className="space-y-0.5">
+                  {files.map((f) => (
+                    <FileRow
+                      key={f.id}
+                      file={f}
+                      onClick={() => onFileClick(f.id)}
+                    />
+                  ))}
+                </div>
+              )}
+              {subfolders.map((sf) => (
+                <SubfolderSection
+                  key={sf.id}
+                  subfolder={sf}
+                  onFileClick={onFileClick}
+                  hasTopFilesAbove={files.length > 0}
                 />
               ))}
-            </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubfolderSection({
+  subfolder,
+  onFileClick,
+  hasTopFilesAbove,
+}: {
+  subfolder: DriveSubfolder;
+  onFileClick: (id: string) => void;
+  hasTopFilesAbove: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const count = subfolder.files.length;
+
+  return (
+    <div className={hasTopFilesAbove ? 'mt-2 pt-2 border-t border-gray-50' : ''}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors text-left"
+      >
+        <span aria-hidden="true" className="text-gray-400 text-xs w-3">
+          {open ? '▾' : '▸'}
+        </span>
+        <span aria-hidden="true" className="text-base">
+          📁
+        </span>
+        <span className="text-sm font-medium text-gray-700 flex-1 truncate">
+          {subfolder.name}
+        </span>
+        <span className="text-xs text-gray-400 whitespace-nowrap">
+          {count} {count === 1 ? 'file' : 'files'}
+        </span>
+      </button>
+      {open && (
+        <div className="ml-5 mt-1 space-y-0.5">
+          {count === 0 ? (
+            <p className="px-3 py-2 text-xs text-gray-500">No files yet.</p>
+          ) : (
+            subfolder.files.map((f) => (
+              <FileRow
+                key={f.id}
+                file={f}
+                onClick={() => onFileClick(f.id)}
+              />
+            ))
           )}
         </div>
       )}

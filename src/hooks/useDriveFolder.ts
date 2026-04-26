@@ -11,21 +11,31 @@ export type DriveFile = {
   size?: string;
 };
 
+export type DriveSubfolder = {
+  id: string;
+  name: string;
+  files: DriveFile[];
+};
+
 type State = {
   files: DriveFile[];
+  subfolders: DriveSubfolder[];
   loading: boolean;
   error: string | null;
 };
 
 const INITIAL_STATE: State = {
   files: [],
+  subfolders: [],
   loading: false,
   error: null,
 };
 
 // Per-folder hook. Lazy: only fetches when `enabled` flips to true,
 // which lets MeetingPanel defer its Drive call until the panel is
-// expanded. Reload allows manual retry on error.
+// expanded. The Edge Function returns top-level files plus a
+// one-level listing of any subfolders; the hook surfaces both as
+// separate fields.
 export function useDriveFolder(folderId: string | null, enabled: boolean) {
   const [state, setState] = useState<State>(INITIAL_STATE);
 
@@ -33,6 +43,7 @@ export function useDriveFolder(folderId: string | null, enabled: boolean) {
     if (!folderId) {
       setState({
         files: [],
+        subfolders: [],
         loading: false,
         error: 'No Drive folder linked to this meeting.',
       });
@@ -47,6 +58,7 @@ export function useDriveFolder(folderId: string | null, enabled: boolean) {
       console.error('[useDriveFolder] invoke error:', error);
       setState({
         files: [],
+        subfolders: [],
         loading: false,
         error: error.message ?? 'Could not load files.',
       });
@@ -55,6 +67,7 @@ export function useDriveFolder(folderId: string | null, enabled: boolean) {
     if (data?.error) {
       setState({
         files: [],
+        subfolders: [],
         loading: false,
         error: String(data.error),
       });
@@ -62,6 +75,7 @@ export function useDriveFolder(folderId: string | null, enabled: boolean) {
     }
     setState({
       files: (data?.files ?? []) as DriveFile[],
+      subfolders: (data?.subfolders ?? []) as DriveSubfolder[],
       loading: false,
       error: null,
     });
