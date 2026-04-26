@@ -1,7 +1,17 @@
 // Phase 5: list files in a Drive folder using the JCA service account.
 // Returns the meeting folder's top-level files plus a one-level-deep
-// listing of any subfolders. Does not recurse beyond one level —
-// nested folders inside a subfolder are silently dropped.
+// listing of any subfolders. Resolves Drive shortcuts so committees
+// sharing live documents across folders work transparently.
+//
+// Shortcut policy:
+//   - shortcut → folder: surfaced as a subfolder. The shortcut's name
+//     becomes the section title (admin's chosen label); the target
+//     folder's contents are listed.
+//   - shortcut → file: target metadata is fetched via files.get so
+//     the row shows the real name, icon, and webViewLink.
+//   - shortcut → another shortcut: not handled (Drive doesn't
+//     normally allow chained shortcuts).
+//   - malformed shortcut (no targetId): skipped with a warning log.
 //
 // Auth: two layers. (1) Supabase platform-level JWT verification rejects
 // unauthenticated requests before this code runs. (2) We additionally
@@ -23,12 +33,18 @@ interface DriveItem {
   webViewLink: string;
   iconLink?: string;
   size?: string;
+  shortcutDetails?: {
+    targetId?: string;
+    targetMimeType?: string;
+    targetResourceKey?: string;
+  };
 }
 
 const SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut';
 const FILE_FIELDS =
-  'id, name, mimeType, modifiedTime, webViewLink, iconLink, size';
+  'id, name, mimeType, modifiedTime, webViewLink, iconLink, size, shortcutDetails';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -114,9 +130,6 @@ async function listFolder(
   url.searchParams.set('q', `'${folderId}' in parents and trashed = false`);
   url.searchParams.set('fields', `files(${FILE_FIELDS})`);
   url.searchParams.set('orderBy', 'name');
-  // Without these flags, files inside a shared drive silently return
-  // as an empty list — Drive's most common foot-gun for service
-  // accounts.
   url.searchParams.set('supportsAllDrives', 'true');
   url.searchParams.set('includeItemsFromAllDrives', 'true');
 
@@ -131,6 +144,68 @@ async function listFolder(
   }
   const data = (await res.json()) as { files?: DriveItem[] };
   return data.files ?? [];
+}
+
+async function getFile(
+  fileId: string,
+  accessToken: string,
+): Promise<DriveItem> {
+  const url = new URL(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
+  );
+  url.searchParams.set('fields', FILE_FIELDS);
+  url.searchParams.set('supportsAllDrives', 'true');
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(
+      `Drive API error (${res.status}) for file ${fileId}: ${detail}`,
+    );
+  }
+  return (await res.json()) as DriveItem;
+}
+
+type Subfolder = { id: string; name: string; files: DriveItem[] };
+type ShortcutResolution =
+  | { kind: 'subfolder'; subfolder: Subfolder }
+  | { kind: 'file'; file: DriveItem }
+  | { kind: 'skip' };
+
+async function resolveShortcut(
+  sc: DriveItem,
+  accessToken: string,
+): Promise<ShortcutResolution> {
+  const targetId = sc.shortcutDetails?.targetId;
+  const targetMime = sc.shortcutDetails?.targetMimeType;
+  if (!targetId) {
+    console.warn(
+      `Shortcut ${sc.id} (${sc.name}) has no targetId; skipping`,
+    );
+    return { kind: 'skip' };
+  }
+  if (targetMime === FOLDER_MIME) {
+    const children = await listFolder(targetId, accessToken);
+    return {
+      kind: 'subfolder',
+      subfolder: {
+        id: targetId,
+        // Use the shortcut's name as the section title — that's the
+        // label the admin chose when they placed it in this folder.
+        name: sc.name,
+        files: children.filter(
+          (i) =>
+            i.mimeType !== FOLDER_MIME && i.mimeType !== SHORTCUT_MIME,
+        ),
+      },
+    };
+  }
+  // Target is a file (or another shortcut, which we treat as a file
+  // for v1 — Drive doesn't normally allow chained shortcuts).
+  const target = await getFile(targetId, accessToken);
+  return { kind: 'file', file: target };
 }
 
 Deno.serve(async (req) => {
@@ -180,7 +255,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'folderId is required' }, 400);
     }
 
-    // ---- Drive calls (1 + N, in parallel)
+    // ---- Drive calls
     const credsRaw = Deno.env.get('GOOGLE_SERVICE_ACCOUNT_JSON');
     if (!credsRaw) {
       return jsonResponse(
@@ -193,27 +268,56 @@ Deno.serve(async (req) => {
 
     const topItems = await listFolder(folderId, accessToken);
 
-    const topFiles = topItems.filter((i) => i.mimeType !== FOLDER_MIME);
-    const subfolderItems = topItems.filter((i) => i.mimeType === FOLDER_MIME);
+    // Partition into the three kinds we care about.
+    const regularFiles: DriveItem[] = [];
+    const realSubfolderItems: DriveItem[] = [];
+    const shortcutItems: DriveItem[] = [];
+    for (const item of topItems) {
+      if (item.mimeType === FOLDER_MIME) realSubfolderItems.push(item);
+      else if (item.mimeType === SHORTCUT_MIME) shortcutItems.push(item);
+      else regularFiles.push(item);
+    }
 
-    // One Drive call per subfolder, in parallel. Promise.all means any
-    // single failure propagates to the top-level error path —
-    // predictable for v1; can soften to Promise.allSettled later if
-    // partial results become useful.
-    const subfolders = await Promise.all(
-      subfolderItems.map(async (sf) => {
-        const children = await listFolder(sf.id, accessToken);
-        return {
-          id: sf.id,
-          name: sf.name,
-          // Nested folders inside a subfolder are intentionally dropped
-          // — spec is one level deep only.
-          files: children.filter((i) => i.mimeType !== FOLDER_MIME),
-        };
-      }),
-    );
+    // Resolve real subfolders and shortcuts in parallel. Promise.all
+    // means any single Drive call failure propagates to the top-level
+    // error path — predictable for v1.
+    const [realSubfolders, shortcutResolutions] = await Promise.all([
+      Promise.all(
+        realSubfolderItems.map(async (sf) => {
+          const children = await listFolder(sf.id, accessToken);
+          return {
+            id: sf.id,
+            name: sf.name,
+            files: children.filter(
+              (i) =>
+                i.mimeType !== FOLDER_MIME && i.mimeType !== SHORTCUT_MIME,
+            ),
+          };
+        }),
+      ),
+      Promise.all(
+        shortcutItems.map((sc) => resolveShortcut(sc, accessToken)),
+      ),
+    ]);
 
-    return jsonResponse({ files: topFiles, subfolders });
+    // Merge resolved shortcuts back into top files / subfolders.
+    const finalTopFiles: DriveItem[] = [...regularFiles];
+    const finalSubfolders: Subfolder[] = [...realSubfolders];
+    for (const r of shortcutResolutions) {
+      if (r.kind === 'file') finalTopFiles.push(r.file);
+      else if (r.kind === 'subfolder') finalSubfolders.push(r.subfolder);
+      // 'skip' is intentional no-op
+    }
+
+    // Re-sort after merge so resolved shortcut items aren't orphaned
+    // at the end of the alphabetical listing.
+    finalTopFiles.sort((a, b) => a.name.localeCompare(b.name));
+    finalSubfolders.sort((a, b) => a.name.localeCompare(b.name));
+
+    return jsonResponse({
+      files: finalTopFiles,
+      subfolders: finalSubfolders,
+    });
   } catch (e) {
     console.error('drive-list-folder error:', e);
     return jsonResponse(

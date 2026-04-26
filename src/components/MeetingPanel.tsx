@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { format, parseISO } from 'date-fns';
 import { useAuth } from '../auth/AuthProvider';
 import { useDriveFolder, type DriveSubfolder } from '../hooks/useDriveFolder';
 import { recordDocumentView } from '../lib/recordView';
@@ -169,15 +170,12 @@ function SubfolderSection({
 }
 
 function formatLongDate(iso: string): string {
-  // board_meetings.meeting_date is a date column; parse as local
-  // calendar date so we don't introduce a timezone-shift surprise.
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  });
+  // board_meetings.meeting_date can come back either as 'YYYY-MM-DD'
+  // (date column) or as a full timestamp like '2026-05-07T00:00:00+00:00'
+  // (timestamptz column). Slice to the date portion so we render the
+  // calendar date the admin entered, regardless of timezone.
+  const datePart = iso.slice(0, 10);
+  const d = parseISO(datePart);
+  if (isNaN(d.getTime())) return iso;
+  return format(d, 'MMMM d, yyyy');
 }

@@ -1,3 +1,4 @@
+import { format, parseISO } from 'date-fns';
 import type { BoardMeeting } from '../lib/db';
 
 const BLUE = '#1A5FA8';
@@ -63,13 +64,13 @@ export function MeetingsTable({
 }
 
 function formatDate(iso: string): string {
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
+  // meeting_date can come back as 'YYYY-MM-DD' or a full timestamp
+  // depending on whether the column is `date` or `timestamptz`. Slice
+  // to the date portion to avoid TZ-shift surprises.
+  const datePart = iso.slice(0, 10);
+  const d = parseISO(datePart);
+  if (isNaN(d.getTime())) return iso;
+  return format(d, 'MMM d, yyyy');
 }
 
 function truncateMiddle(s: string, max: number): string {
