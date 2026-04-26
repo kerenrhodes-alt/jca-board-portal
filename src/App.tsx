@@ -4,6 +4,7 @@ import { AppShell } from './components/AppShell';
 import { Dashboard } from './pages/Dashboard';
 import { Documents } from './pages/Documents';
 import { Discussions } from './pages/Discussions';
+import { ThreadDetail } from './pages/ThreadDetail';
 import { Voting } from './pages/Voting';
 import { Financials } from './pages/Financials';
 import { Engagement } from './pages/Engagement';
@@ -22,6 +23,7 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="documents" element={<Documents />} />
         <Route path="discussions" element={<Discussions />} />
+        <Route path="discussions/:threadId" element={<ThreadDetail />} />
         <Route path="voting" element={<Voting />} />
         <Route path="financials" element={<Financials />} />
         <Route
