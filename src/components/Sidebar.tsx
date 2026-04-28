@@ -1,12 +1,14 @@
 import { useState, type ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
+import { usePolls } from '../hooks/usePolls';
 
 const BLUE = '#1A5FA8';
 const GOLD = '#C8922A';
 
 export function Sidebar() {
   const { member, session, isAdmin, signOut } = useAuth();
+  const { pendingForMe } = usePolls();
   const [signingOut, setSigningOut] = useState(false);
 
   const onSignOut = async () => {
@@ -17,6 +19,8 @@ export function Sidebar() {
       setSigningOut(false);
     }
   };
+
+  const pendingCount = pendingForMe.length;
 
   return (
     <aside className="fixed inset-y-0 left-0 w-60 bg-white border-r border-gray-200 flex flex-col">
@@ -37,7 +41,21 @@ export function Sidebar() {
           <NavItem to="/" label="Dashboard" />
           <NavItem to="/documents" label="Documents" />
           <NavItem to="/discussions" label="Discussions" />
-          <NavItem to="/voting" label="Voting" />
+          <NavItem
+            to="/voting"
+            label="Voting"
+            badge={
+              pendingCount > 0 ? (
+                <span
+                  aria-label={`${pendingCount} polls awaiting your vote`}
+                  className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full px-1.5 text-[10px] font-semibold text-white"
+                  style={{ background: GOLD }}
+                >
+                  {pendingCount}
+                </span>
+              ) : null
+            }
+          />
           <NavItem to="/financials" label="Financials" />
         </NavSection>
         {isAdmin && (
@@ -87,19 +105,28 @@ function NavSection({
   );
 }
 
-function NavItem({ to, label }: { to: string; label: string }) {
+function NavItem({
+  to,
+  label,
+  badge,
+}: {
+  to: string;
+  label: string;
+  badge?: ReactNode;
+}) {
   return (
     <NavLink
       to={to}
       end={to === '/'}
       className={({ isActive }) =>
-        `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+        `flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
           isActive ? 'text-white' : 'text-gray-700 hover:bg-gray-50'
         }`
       }
       style={({ isActive }) => (isActive ? { background: BLUE } : undefined)}
     >
-      {label}
+      <span className="flex-1">{label}</span>
+      {badge}
     </NavLink>
   );
 }
